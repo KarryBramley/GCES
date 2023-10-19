@@ -1,0 +1,24 @@
+clone/apex/
+clone/CodeBERT/saved_models/
+clone/CodeBERT/microsoft/
+clone/CodeBERT/bert-base-uncased/
+clone/CodeBERT/__pycache__/
+clone/CodeT5/Salesforce/
+
+sum/CodeBERT/__pycache__/
+sum/CodeBERT/model/
+
+svd/CodeSearchNet/
+svd/CodeBERT/saved_models/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+*.out
+*.jsonl
+*.log
+*.tar.bz2
+*.pyc
+*.json
+*.bin
+*.txt
