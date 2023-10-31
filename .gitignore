@@ -4,12 +4,22 @@ clone/CodeBERT/microsoft/
 clone/CodeBERT/bert-base-uncased/
 clone/CodeBERT/__pycache__/
 clone/CodeT5/Salesforce/
+clone/CodeT5/model/
+clone/CodeT5/*.pkl
 
 sum/CodeBERT/__pycache__/
 sum/CodeBERT/model/
 
 svd/CodeSearchNet/
 svd/CodeBERT/saved_models/
+svd/CodeBERT/*.pkl
+svd/CodeT5/model/
+svd/CodeT5/*.pkl
+svd/salesforce
+
+func/CodeBERT/saved_models/
+func/CodeBERT/.pkl*
+func/python800/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -22,3 +32,4 @@ svd/CodeBERT/saved_models/
 *.json
 *.bin
 *.txt
+*.pkl
