@@ -62,8 +62,6 @@ import numpy as np
 #   return state, args
 
 
-
-
 def gather_flat_grad(grads):
     views = []
     for p in grads:

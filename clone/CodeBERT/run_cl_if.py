@@ -31,6 +31,7 @@ from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                           RobertaConfig, RobertaForSequenceClassification, RobertaTokenizer,
                           DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer)
 from construct_exemplar_if import construct_exemplars, calculate_coefficient, construct_exemplars_if
+from construct_exemplar_grad import construct_exemplars_grad
 from ewc import *
 
 from opendelta import AdapterModel
@@ -323,7 +324,9 @@ def train(args, train_dataset, model, tokenizer, param_influence):
         train_replay_examples = train_dataset.origin_data
         eval_replay_examples = eval_dataset.origin_data
         #construct_exemplars(model_to_save,args,train_replay_examples,eval_replay_examples,'random')
-        construct_exemplars_if(model_to_save, args, train_replay_examples, eval_replay_examples,
+        # construct_exemplars_if(model_to_save, args, train_replay_examples, eval_replay_examples,
+        #                         tokenizer, args.device, param_influence, 'ours')
+        construct_exemplars_grad(model_to_save, args, train_replay_examples, eval_replay_examples,
                                 tokenizer, args.device, param_influence, 'ours')
 
 
@@ -666,6 +669,7 @@ def main():
         ]
         param_influence = []
         for n, p in param_optimizer:
+            # print(n)
             if (not any(fr in n for fr in frozen)):
                 param_influence.append(p)
             elif 'roberta.embeddings.word_embeddings.' in n:

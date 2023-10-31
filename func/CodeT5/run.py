@@ -50,13 +50,11 @@ class Example(object):
 
     def __init__(self,
                  idx,
-                 source1,
-                 source2,
+                 source,
                  target,
                  ):
         self.idx = idx
-        self.source1 = source1
-        self.source2 = source2
+        self.source = source
         self.target = target
 
 
@@ -71,14 +69,12 @@ def read_examples(filename):
             js = json.loads(line)
             if 'idx' not in js:
                 js['idx'] = idx
-            code1 = js['code1']
-            code2 = js['code2']
-            nl = 'true' if int(js['label']) == 1 else 'false'
+            code = js['code']
+            nl = int(js['label'])
             examples.append(
                 Example(
                     idx=idx,
-                    source1=code1,
-                    source2=code2,
+                    source=task_prefix + code,
                     target=nl,
                 )
             )
@@ -108,25 +104,14 @@ def convert_examples_to_features(examples, tokenizer, args, stage=None):
     features = []
     for example_index, example in enumerate(examples):
         # source
-        source_tokens1 = tokenizer.tokenize(example.source1)[:256 - 2]
-        source_tokens1 = [tokenizer.cls_token] + source_tokens1 + [tokenizer.sep_token]
-        source_ids1 = tokenizer.convert_tokens_to_ids(source_tokens1)
-        padding_length1 = 256 - len(source_ids1)
-        source_ids1+=[tokenizer.pad_token_id]*padding_length1
-        source_mask1 = [1] * (len(source_tokens1))
-        source_mask1 += [0] * padding_length1
-        
-        source_tokens2 = tokenizer.tokenize(example.source2)[:256 - 2]
-        source_tokens2 = [tokenizer.cls_token] + source_tokens2 + [tokenizer.sep_token]
-        source_ids2 = tokenizer.convert_tokens_to_ids(source_tokens2)
-        padding_length2 = 256 - len(source_ids2)
-        source_ids2+=[tokenizer.pad_token_id]*padding_length2
-        source_mask2 = [1] * (len(source_tokens2))
-        source_mask2 += [0] * padding_length2
-
-        source_tokens = source_tokens1 + source_tokens2
-        source_ids = source_ids1 + source_ids2
-        source_mask = source_mask1 + source_mask2
+        source_tokens = tokenizer.tokenize(example.source)[:args.max_source_length - 2]
+        source_tokens = [tokenizer.cls_token] + source_tokens + [tokenizer.sep_token]
+        source_ids = tokenizer.convert_tokens_to_ids(source_tokens)
+        # 加mask
+        source_mask = [1] * (len(source_tokens))
+        padding_length = args.max_source_length - len(source_ids)
+        source_ids += [tokenizer.pad_token_id] * padding_length
+        source_mask += [0] * padding_length
 
         # target
         if stage == "test":
@@ -308,6 +293,7 @@ def main():
 
     if args.do_train:
         # Prepare training data loader
+        print(args.train_filename)
         train_examples = read_examples(args.train_filename)
 
         train_features = convert_examples_to_features(train_examples, tokenizer, args, stage='train')
@@ -544,7 +530,7 @@ def main():
                     for pred in preds:
                         text = tokenizer.decode(pred, skip_special_tokens=True, clean_up_tokenization_spaces=False)
                         p.append(text)
-    
+
             model.train()
             predictions = []
             sum1=0
@@ -573,9 +559,7 @@ def main():
             p = tp/(tp+fp)
             r = tp/(tp+fn)
             print(tp,tn,fp,fn)
-            print("Precision is {}".format(p))
-            print("Recall is {}".format(r))
-            print("F1 is {}".format(2*p*r/(p+r)))
+            print("The F1 is {}".format(2*p*r/(p+r)))
             
 
 

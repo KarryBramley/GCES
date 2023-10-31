@@ -293,6 +293,7 @@ def main():
 
     if args.do_train:
         # Prepare training data loader
+        print(args.train_filename)
         train_examples = read_examples(args.train_filename)
 
         train_features = convert_examples_to_features(train_examples, tokenizer, args, stage='train')

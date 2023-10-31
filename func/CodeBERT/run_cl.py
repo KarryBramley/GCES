@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler,TensorDataset
 from torch.utils.data.distributed import DistributedSampler
+from sklearn.metrics import precision_score, recall_score, f1_score
 import json
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -22,6 +23,7 @@ except:
 from tqdm import tqdm, trange
 import multiprocessing
 from model import Model
+from copy import deepcopy
 cpu_cont = multiprocessing.cpu_count()
 from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                           BertConfig, BertForMaskedLM, BertTokenizer,
@@ -29,6 +31,10 @@ from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                           OpenAIGPTConfig, OpenAIGPTLMHeadModel, OpenAIGPTTokenizer,
                           RobertaConfig, RobertaForSequenceClassification, RobertaTokenizer,
                           DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer)
+
+from construct_exemplar_grad import construct_exemplars_grad
+from construct_exemplar import calculate_coefficient, construct_exemplars_ours
+from ewc import *
 
 logger = logging.getLogger(__name__)
 
@@ -49,37 +55,51 @@ class InputFeatures(object):
                  input_ids,
                  idx,
                  label,
+                 origin_source,
+                 origin_target
 
     ):
         self.input_tokens = input_tokens
         self.input_ids = input_ids
         self.idx=str(idx)
         self.label=label
+        self.origin_source = origin_source
+        self.origin_target = origin_target
 
         
 def convert_examples_to_features(js,tokenizer,args):
     #source
-    code=' '.join(js['func_before'].split())
+    code=' '.join(js['code'].split())
     code_tokens=tokenizer.tokenize(code)[:args.block_size-2]
     source_tokens =[tokenizer.cls_token]+code_tokens+[tokenizer.sep_token]
     source_ids =  tokenizer.convert_tokens_to_ids(source_tokens)
     padding_length = args.block_size - len(source_ids)
     source_ids+=[tokenizer.pad_token_id]*padding_length
-    return InputFeatures(source_tokens,source_ids,'',int(js['vul']))
+    return InputFeatures(source_tokens,source_ids,'',int(js['label']),js['code'],js['label'])
 
 class TextDataset(Dataset):
-    def __init__(self, tokenizer, args, file_path=None):
+    def __init__(self, tokenizer, args, file_path=None,extra=None):
         self.examples = []
-        self.count=0
         with open(file_path) as f:
             for line in f:
                 js=json.loads(line.strip())
                 self.examples.append(convert_examples_to_features(js,tokenizer,args))
-                self.count+=self.examples[-1].label
-        if 'train' in file_path:
-            self.count=self.count
-            self.count=(len(self.examples)-self.count)/(self.count)
-            logger.info("ratio: {}".format(self.count))
+        self.origin_data = deepcopy(self.examples)
+
+        if extra is not None:
+            self.replay_examples = []
+            if extra == 'train':
+                examplar_path = args.train_examplar_path
+            else:
+                examplar_path = args.eval_examplar_path
+            with open(examplar_path) as f:
+                for line in f:
+                    js=json.loads(line.strip())
+                    self.replay_examples.append(convert_examples_to_features(js,tokenizer,args))
+                if 'emr' in args.mode or args.mode in ['hybrid']:
+                    self.examples.extend(self.replay_examples)
+
+        if False and 'train' in file_path:
             for idx, example in enumerate(self.examples[:3]):
                     logger.info("*** Example ***")
                     logger.info("idx: {}".format(idx))
@@ -103,15 +123,7 @@ def set_seed(seed=42):
     torch.backends.cudnn.deterministic = True
 
 
-def train(args, train_dataset, model, tokenizer):
-    el2n_score = pickle.load(open("./saved_models/emr_ours_adaewc/task_0/l2_score/el2n_score_" + str(0) + ".pkl", "rb"))
-    train_idx_sorted = list(np.argsort(el2n_score))
-
-    start_idx = int(len(el2n_score) * 0.4)
-    # subset_size = int(len(el2n_score) * 0.4)
-    selected_train_idx = train_idx_sorted[start_idx: ]
-    train_dataset = [te for tei, te in enumerate(train_dataset) if tei in selected_train_idx]
-
+def train(args, train_dataset, model, tokenizer, param_influence):
     """ Train the model """ 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
@@ -175,75 +187,105 @@ def train(args, train_dataset, model, tokenizer):
     best_acc=0.0
     # model.resize_token_embeddings(len(tokenizer))
     model.zero_grad()
- 
-    for idx in range(args.start_epoch, int(args.num_train_epochs)): 
-        bar = tqdm(train_dataloader,total=len(train_dataloader))
-        tr_num=0
-        train_loss=0
-        for step, batch in enumerate(bar):
-            inputs = batch[0].to(args.device)        
-            labels=batch[1].to(args.device) 
-            model.train()
-            loss,logits = model(inputs,labels)
 
+    if args.task_id>0 and 'ewc' in args.mode:
+        adaptive_weight = calculate_coefficient(train_dataset.origin_data, train_dataset.replay_examples)
+        #adaptive_weight=1
+    else:
+        adaptive_weight=1
+    logger.info("  Adaptive weight = %f", adaptive_weight)
 
-            if args.n_gpu > 1:
-                loss = loss.mean()  # mean() to average on multi-gpu parallel training
-            if args.gradient_accumulation_steps > 1:
-                loss = loss / args.gradient_accumulation_steps
-
-            if args.fp16:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-
-            tr_loss += loss.item()
-            tr_num+=1
-            train_loss+=loss.item()
-            if avg_loss==0:
-                avg_loss=tr_loss
-            avg_loss=round(train_loss/tr_num,5)
-            bar.set_description("epoch {} loss {}".format(idx,avg_loss))
-
-                
-            if (step + 1) % args.gradient_accumulation_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad()
-                scheduler.step()  
-                global_step += 1
-                output_flag=True
-                avg_loss=round(np.exp((tr_loss - logging_loss) /(global_step- tr_nb)),4)
-                if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
-                    logging_loss = tr_loss
-                    tr_nb=global_step
-
-                if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
+    if args.task_id>0:
+        for idx in range(args.start_epoch, int(args.num_train_epochs)): 
+            if 'ewc' in args.mode and args.task_id>0:
+                #replay_examples = train_dataset.replay_examples
+                replay_examples = TextDataset(tokenizer, args, args.train_examplar_path)
+                replay_sampler = SequentialSampler(replay_examples)
+                replay_dataloader = DataLoader(replay_examples, sampler=replay_sampler, batch_size=1)
+                ewc = EWC(model, replay_dataloader, args.device, len(replay_examples))
+            bar = tqdm(train_dataloader,total=len(train_dataloader))
+            tr_num=0
+            train_loss=0
+            for step, batch in enumerate(bar):
+                inputs = batch[0].to(args.device)        
+                labels=batch[1].to(args.device) 
+                model.train()
+                loss,logits = model(inputs,labels)
+                if args.task_id>0 and 'ewc' in args.mode:
+                    ewc_loss = ewc.penalty(model)
+                    loss = loss+args.ewc_weight * adaptive_weight * ewc_loss
+        
+    
+                if args.n_gpu > 1:
+                    loss = loss.mean()  # mean() to average on multi-gpu parallel training
+                if args.gradient_accumulation_steps > 1:
+                    loss = loss / args.gradient_accumulation_steps
+    
+                if args.fp16:
+                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+    
+                tr_loss += loss.item()
+                tr_num+=1
+                train_loss+=loss.item()
+                if avg_loss==0:
+                    avg_loss=tr_loss
+                avg_loss=round(train_loss/tr_num,5)
+                bar.set_description("epoch {} loss {}".format(idx,avg_loss))
+    
                     
-                    if args.local_rank == -1 and args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
-                        results = evaluate(args, model, tokenizer,eval_when_training=True)
-                        for key, value in results.items():
-                            logger.info("  %s = %s", key, round(value,4))                    
-                        # Save model checkpoint
+                if (step + 1) % args.gradient_accumulation_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    scheduler.step()  
+                    global_step += 1
+                    output_flag=True
+                    avg_loss=round(np.exp((tr_loss - logging_loss) /(global_step- tr_nb)),4)
+                    if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
+                        logging_loss = tr_loss
+                        tr_nb=global_step
+    
+                    if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
                         
-                    if results['eval_f1']>best_acc:
-                        best_acc=results['eval_f1']
-                        logger.info("  "+"*"*20)  
-                        logger.info("  Best acc:%s",round(best_acc,4))
-                        logger.info("  "+"*"*20)                          
-                        
-                        checkpoint_prefix = 'l2_checkpoint-best-acc'
-                        # checkpoint_prefix = 'checkpoint-best-acc'
-                        output_dir = os.path.join(args.output_dir, '{}'.format(checkpoint_prefix))                        
-                        if not os.path.exists(output_dir):
-                            os.makedirs(output_dir)                        
-                        model_to_save = model.module if hasattr(model,'module') else model
-                        output_dir = os.path.join(output_dir, '{}'.format('model.bin')) 
-                        torch.save(model_to_save.state_dict(), output_dir)
-                        logger.info("Saving model checkpoint to %s", output_dir)
-                        
+                        if args.local_rank == -1 and args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
+                            results = evaluate(args, model, tokenizer,eval_when_training=True)
+                            for key, value in results.items():
+                                logger.info("  %s = %s", key, round(value,4))                    
+                            # Save model checkpoint
+                            
+                        if results['eval_f1']>best_acc:
+                            best_acc=results['eval_f1']
+                            logger.info("  "+"*"*20)  
+                            logger.info("  Best acc:%s",round(best_acc,4))
+                            logger.info("  "+"*"*20)                          
+                            
+                            checkpoint_prefix = 'checkpoint-best-acc'
+                            output_dir = os.path.join(args.output_dir, '{}'.format(checkpoint_prefix))                        
+                            if not os.path.exists(output_dir):
+                                os.makedirs(output_dir)                        
+                            model_to_save = model.module if hasattr(model,'module') else model
+                            output_dir = os.path.join(output_dir, '{}'.format('model.bin')) 
+                            torch.save(model_to_save.state_dict(), output_dir)
+                            logger.info("Saving model checkpoint to %s", output_dir)
+    else:
+        output_dir = os.path.join(args.output_dir, 'checkpoint-best-acc')
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        model_to_save = model.module if hasattr(model, 'module') else model
+        output_model_file = os.path.join(output_dir, "model.bin")
+        torch.save(model_to_save.state_dict(), output_model_file)
+
+    eval_dataset = TextDataset(tokenizer, args, args.eval_data_file)
+    if 'emr' in args.mode or 'ewc' in args.mode or args.mode in ['hybrid']:
+        train_replay_examples = train_dataset.origin_data
+        eval_replay_examples = eval_dataset.origin_data
+        # construct_exemplars(model_to_save,args,train_replay_examples,eval_replay_examples,'random')
+        # construct_exemplars_ours(model_to_save,args,train_replay_examples,eval_replay_examples,tokenizer,args.device,'ours')
+        construct_exemplars_grad(model_to_save,args,train_replay_examples,eval_replay_examples,tokenizer,args.device, param_influence, 'ours')
 
 
 
@@ -251,7 +293,10 @@ def evaluate(args, model, tokenizer,eval_when_training=False):
     # Loop to handle MNLI double evaluation (matched, mis-matched)
     eval_output_dir = args.output_dir
 
-    eval_dataset = TextDataset(tokenizer, args,args.eval_data_file)
+    if args.task_id>0:
+        eval_dataset = TextDataset(tokenizer, args,args.eval_data_file,'eval')
+    else:
+        eval_dataset = TextDataset(tokenizer, args,args.eval_data_file)
 
     if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(eval_output_dir)
@@ -285,42 +330,28 @@ def evaluate(args, model, tokenizer,eval_when_training=False):
         nb_eval_steps += 1
     logits=np.concatenate(logits,0)
     labels=np.concatenate(labels,0)
-    preds=logits[:,0]>0.5
-    eval_acc=np.mean(labels==preds)
-    tp=0
-    tn=0
-    fp=0
-    fn=0
-    for i, j in zip(labels,preds):
-        j=int(j)
-        #print(i,j)
-        #print(type(i))
-        #input()
-        if i==1 and j ==1:
-            tp+=1
-        elif i==0 and j ==1:
-            fp+=1
-        elif i==1 and j ==0:
-            fn+=1
-        elif i==0 and j ==0:
-            tn+=1
-    p = (1+tp)/(1+tp+fp)
-    r = (1+tp)/(1+tp+fn)
-    print(tp,tn,fp,fn)
-    eval_f1 = 2*p*r/(p+r)
+    preds=logits.argmax(-1)
+
+    print(labels)
+    print(preds)
+
+    eval_prec = precision_score(labels, preds, average='weighted')
+    eval_recall = recall_score(labels, preds, average='weighted')
+    eval_f1 = f1_score(labels, preds, average='weighted')
+
     eval_loss = eval_loss / nb_eval_steps
     perplexity = torch.tensor(eval_loss)
             
     result = {
         "eval_loss": float(perplexity),
-        "eval_acc":round(eval_acc,4),
+        "eval_acc":round(eval_prec,4),
         "eval_f1":round(eval_f1,4),
     }
     return result
 
-def test(args, model, tokenizer, filename):
+def test(args, model, tokenizer):
     # Loop to handle MNLI double evaluation (matched, mis-matched)
-    eval_dataset = TextDataset(tokenizer, args, filename)
+    eval_dataset = TextDataset(tokenizer, args,args.test_data_file)
 
 
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
@@ -333,16 +364,17 @@ def test(args, model, tokenizer, filename):
         model = torch.nn.DataParallel(model)
 
     # Eval!
-    #logger.info("***** Running Test *****")
-    #logger.info("  Num examples = %d", len(eval_dataset))
-    #logger.info("  Batch size = %d", args.eval_batch_size)
+    logger.info("***** Running Test *****")
+    logger.info("  Num examples = %d", len(eval_dataset))
+    logger.info("  Batch size = %d", args.eval_batch_size)
+    eval_loss = 0.0
+    nb_eval_steps = 0
     model.eval()
     logits=[]   
     labels=[]
     for batch in tqdm(eval_dataloader,total=len(eval_dataloader)):
-    #for batch in eval_dataloader:
-        inputs = batch[0].to(args.device)
-        label=batch[1].to(args.device)
+        inputs = batch[0].to(args.device)        
+        label=batch[1].to(args.device) 
         with torch.no_grad():
             logit = model(inputs)
             logits.append(logit.cpu().numpy())
@@ -351,36 +383,12 @@ def test(args, model, tokenizer, filename):
     logits=np.concatenate(logits,0)
     labels=np.concatenate(labels,0)
     preds=logits[:,0]>0.5
-    eval_acc=np.mean(labels==preds)
-    tp=0
-    tn=0
-    fp=0
-    fn=0
-    for i, j in zip(labels,preds):
-        j=int(j)
-        #print(i,j)
-        #print(type(i))
-        #input()
-        if i==1 and j ==1:
-            tp+=1
-        elif i==0 and j ==1:
-            fp+=1
-        elif i==1 and j ==0:
-            fn+=1
-        elif i==0 and j ==0:
-            tn+=1
-    p = (tp)/(tp+fp)
-    r = (tp)/(tp+fn)
-    #print(tp,tn,fp,fn)
-    eval_f1 = 2*p*r/(p+r)
-
-    result = {
-        "eval_acc":round(100*eval_acc,2),
-        "eval_f1":round(100*eval_f1,2),
-        "eval_p":round(100*p,2),
-        "eval_r":round(100*r,2),
-    }
-    return result
+    with open(os.path.join(args.output_dir,"predictions.txt"),'w') as f:
+        for example,pred in zip(eval_dataset.examples,preds):
+            if pred:
+                f.write(example.idx+'\t1\n')
+            else:
+                f.write(example.idx+'\t0\n')    
     
                         
                         
@@ -405,6 +413,15 @@ def main():
                         help="The model architecture to be fine-tuned.")
     parser.add_argument("--model_name_or_path", default=None, type=str,
                         help="The model checkpoint for weights initialization.")
+    parser.add_argument("--mode", default="", type=str, help="Mode")
+    parser.add_argument("--task_id", default=0, type=int, help="The id of current task.")
+    parser.add_argument("--ewc_weight", default=1, type=int, help="The weight of EWC penalty.")
+    parser.add_argument("--train_examplar_path", default="", type=str, help="Path of training examplars.")
+    parser.add_argument("--eval_examplar_path", default="", type=str, help="Path of valid examplars.")
+    parser.add_argument("--train_replay_size", default=100, type=int, help="The size of replayed training examplars.")
+    parser.add_argument("--eval_replay_size", default=25, type=int, help="The size of replayed valid examplars.")
+    parser.add_argument("--k", default=5, type=int, help="Hyperparameter")
+    parser.add_argument("--mu", default=5, type=int, help="Hyperparameter")
 
     parser.add_argument("--mlm", action='store_true',
                         help="Train with masked-language modeling loss instead of language modeling.")
@@ -504,6 +521,7 @@ def main():
         torch.distributed.init_process_group(backend='nccl')
         args.n_gpu = 1
     args.device = device
+    args.eval_replay_size = args.train_replay_size//8
     args.per_gpu_train_batch_size=args.train_batch_size//args.n_gpu
     args.per_gpu_eval_batch_size=args.eval_batch_size//args.n_gpu
     # Setup logging
@@ -542,7 +560,7 @@ def main():
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                                           cache_dir=args.cache_dir if args.cache_dir else None)
-    config.num_labels=1
+    config.num_labels=800
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name,
                                                 do_lower_case=args.do_lower_case,
                                                 cache_dir=args.cache_dir if args.cache_dir else None)
@@ -570,73 +588,69 @@ def main():
             model.load_state_dict(torch.load(args.load_model_path))
             model.to(args.device)
 
+        #########  冻结大部分层  #########
+        param_optimizer = list(model.named_parameters())
+
+        # 冻结6层试试，之前是7层
+        # frozen = [
+        #     "encoder.roberta.embeddings",
+        #     "encoder.roberta.encoder.layer.0",
+        #     "encoder.roberta.encoder.layer.1",
+        #     "encoder.roberta.encoder.layer.2",
+        #     "encoder.roberta.encoder.layer.3",
+        # ]
+        frozen = [
+            
+        ]
+        param_influence = []
+        for n, p in param_optimizer:
+            # print(n)
+            if (not any(fr in n for fr in frozen)):
+                param_influence.append(p)
+            elif 'roberta.embeddings.word_embeddings.' in n:
+                pass # need gradients through embedding layer for computing saliency map
+            else:
+                p.requires_grad = False
+        ####################
+
+        param_size = 0
+        for p in param_influence:
+            tmp_p = p.clone().detach()
+            param_size += torch.numel(tmp_p)
+        logger.info("  Parameter size = %d", param_size)
+        
         if args.local_rank not in [-1, 0]:
             torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training process the dataset, and the others will use the cache
 
-        train_dataset = TextDataset(tokenizer, args,args.train_data_file)
-        if train_dataset.count!=0:
-            model.weight=train_dataset.count
+        if args.task_id>0:
+            train_dataset=TextDataset(tokenizer, args, args.train_data_file,'train')
+        else:
+            train_dataset=TextDataset(tokenizer, args, args.train_data_file)
         if args.local_rank == 0:
             torch.distributed.barrier()
 
-        train(args, train_dataset, model, tokenizer)
+        train(args, train_dataset, model, tokenizer, param_influence)
 
 
 
     # Evaluation
     results = {}
     if args.do_eval and args.local_rank in [-1, 0]:
-        checkpoint_prefix = 'checkpoint-best-acc/model.bin'
-
-        output_dir = os.path.join(args.output_dir, '{}'.format(checkpoint_prefix))  
-        model.load_state_dict(torch.load(output_dir))      
-        model.to(args.device)
-        result=evaluate(args, model, tokenizer)
-        logger.info("***** Eval results *****")
-        for key in sorted(result.keys()):
-            logger.info("  %s = %s", key, str(round(result[key],4)))
+            checkpoint_prefix = 'checkpoint-best-acc/model.bin'
+            output_dir = os.path.join(args.output_dir, '{}'.format(checkpoint_prefix))  
+            model.load_state_dict(torch.load(output_dir))      
+            model.to(args.device)
+            result=evaluate(args, model, tokenizer)
+            logger.info("***** Eval results *****")
+            for key in sorted(result.keys()):
+                logger.info("  %s = %s", key, str(round(result[key],4)))
             
     if args.do_test and args.local_rank in [-1, 0]:
-        # checkpoint_prefix = 'l2_checkpoint-best-acc/model.bin'
-        checkpoint_prefix = 'checkpoint-best-acc/model.bin'
-        files=[]
-        if args.test_data_file is not None:
-            for file_name in args.test_data_file.split(','):
-                files.append(file_name)
-        output_dir=[]
-        if args.output_dir is not None:
-            for model_name in args.output_dir.split(','):
-                output_dir.append(os.path.join(model_name, '{}'.format(checkpoint_prefix)))
-        #assert len(files) == len(output_dir)
-        
-        acc_sum=0
-        f1_sum=0
-        p_sum=0
-        r_sum=0
-        acc_list=[[] for _ in range(len(output_dir))]
-        f1_list=[[] for _ in range(len(output_dir))]
-
-        for idx, model_name in enumerate(output_dir):
-            model.load_state_dict(torch.load(model_name),strict=False)      
+            checkpoint_prefix = 'checkpoint-best-acc/model.bin'
+            output_dir = os.path.join(args.output_dir, '{}'.format(checkpoint_prefix))  
+            model.load_state_dict(torch.load(output_dir))                  
             model.to(args.device)
-            for file in files[:idx + 1]:
-                result=test(args, model, tokenizer, file)
-                acc_sum+=result["eval_acc"]/(idx+1)
-                f1_sum+=result["eval_f1"]/(idx+1)
-                p_sum+=result["eval_p"]/(idx+1)
-                r_sum+=result["eval_r"]/(idx+1)
-                print(result["eval_f1"],result["eval_p"],result["eval_r"])
-                acc_list[idx].append(result["eval_acc"])
-                f1_list[idx].append(result["eval_f1"])
-            print('**********')
-        for idx in range(len(output_dir)):
-           for value in f1_list[idx]:
-               print(round(value,2), end='  ')
-           print('')
-        print('Avg_ACC:',round(acc_sum/len(output_dir), 2))
-        print('Avg_F1:',round(f1_sum/len(output_dir), 2))
-        print('Avg_P:',round(p_sum/len(output_dir), 2))
-        print('Avg_R:',round(r_sum/len(output_dir), 2))
+            test(args, model, tokenizer)
 
     return results
 

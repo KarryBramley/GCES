@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler,TensorDataset
 from torch.utils.data.distributed import DistributedSampler
+from sklearn.metrics import precision_score, recall_score, f1_score
 import json
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -59,13 +60,13 @@ class InputFeatures(object):
         
 def convert_examples_to_features(js,tokenizer,args):
     #source
-    code=' '.join(js['func_before'].split())
+    code=' '.join(js['code'].split())
     code_tokens=tokenizer.tokenize(code)[:args.block_size-2]
     source_tokens =[tokenizer.cls_token]+code_tokens+[tokenizer.sep_token]
     source_ids =  tokenizer.convert_tokens_to_ids(source_tokens)
     padding_length = args.block_size - len(source_ids)
     source_ids+=[tokenizer.pad_token_id]*padding_length
-    return InputFeatures(source_tokens,source_ids,'',int(js['vul']))
+    return InputFeatures(source_tokens,source_ids,'',int(js['label']))
 
 class TextDataset(Dataset):
     def __init__(self, tokenizer, args, file_path=None):
@@ -104,13 +105,13 @@ def set_seed(seed=42):
 
 
 def train(args, train_dataset, model, tokenizer):
-    el2n_score = pickle.load(open("./saved_models/emr_ours_adaewc/task_0/l2_score/el2n_score_" + str(0) + ".pkl", "rb"))
-    train_idx_sorted = list(np.argsort(el2n_score))
+    # el2n_score = pickle.load(open("./saved_models/emr_ours_adaewc/task_0/l2_score/el2n_score_" + str(0) + ".pkl", "rb"))
+    # train_idx_sorted = list(np.argsort(el2n_score))
 
-    start_idx = int(len(el2n_score) * 0.4)
+    # start_idx = int(len(el2n_score) * 0.45)
     # subset_size = int(len(el2n_score) * 0.4)
-    selected_train_idx = train_idx_sorted[start_idx: ]
-    train_dataset = [te for tei, te in enumerate(train_dataset) if tei in selected_train_idx]
+    # selected_train_idx = train_idx_sorted[start_idx: start_idx + subset_size]
+    # train_dataset = [te for tei, te in enumerate(train_dataset) if tei in selected_train_idx]
 
     """ Train the model """ 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
@@ -186,7 +187,6 @@ def train(args, train_dataset, model, tokenizer):
             model.train()
             loss,logits = model(inputs,labels)
 
-
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
             if args.gradient_accumulation_steps > 1:
@@ -234,8 +234,7 @@ def train(args, train_dataset, model, tokenizer):
                         logger.info("  Best acc:%s",round(best_acc,4))
                         logger.info("  "+"*"*20)                          
                         
-                        checkpoint_prefix = 'l2_checkpoint-best-acc'
-                        # checkpoint_prefix = 'checkpoint-best-acc'
+                        checkpoint_prefix = 'checkpoint-best-acc'
                         output_dir = os.path.join(args.output_dir, '{}'.format(checkpoint_prefix))                        
                         if not os.path.exists(output_dir):
                             os.makedirs(output_dir)                        
@@ -285,35 +284,23 @@ def evaluate(args, model, tokenizer,eval_when_training=False):
         nb_eval_steps += 1
     logits=np.concatenate(logits,0)
     labels=np.concatenate(labels,0)
-    preds=logits[:,0]>0.5
-    eval_acc=np.mean(labels==preds)
-    tp=0
-    tn=0
-    fp=0
-    fn=0
-    for i, j in zip(labels,preds):
-        j=int(j)
-        #print(i,j)
-        #print(type(i))
-        #input()
-        if i==1 and j ==1:
-            tp+=1
-        elif i==0 and j ==1:
-            fp+=1
-        elif i==1 and j ==0:
-            fn+=1
-        elif i==0 and j ==0:
-            tn+=1
-    p = (1+tp)/(1+tp+fp)
-    r = (1+tp)/(1+tp+fn)
-    print(tp,tn,fp,fn)
-    eval_f1 = 2*p*r/(p+r)
+    preds=logits.argmax(-1)
+
+    print(labels)
+    print(preds)
+
+    eval_prec = precision_score(labels, preds, average='weighted')
+    eval_recall = recall_score(labels, preds, average='weighted')
+    eval_f1 = f1_score(labels, preds, average='weighted')
+
+    # eval_acc=np.mean(labels==preds)
     eval_loss = eval_loss / nb_eval_steps
+
     perplexity = torch.tensor(eval_loss)
             
     result = {
         "eval_loss": float(perplexity),
-        "eval_acc":round(eval_acc,4),
+        "eval_acc":round(eval_prec,4),
         "eval_f1":round(eval_f1,4),
     }
     return result
@@ -350,35 +337,18 @@ def test(args, model, tokenizer, filename):
 
     logits=np.concatenate(logits,0)
     labels=np.concatenate(labels,0)
-    preds=logits[:,0]>0.5
+    preds=logits.argmax(-1)
     eval_acc=np.mean(labels==preds)
-    tp=0
-    tn=0
-    fp=0
-    fn=0
-    for i, j in zip(labels,preds):
-        j=int(j)
-        #print(i,j)
-        #print(type(i))
-        #input()
-        if i==1 and j ==1:
-            tp+=1
-        elif i==0 and j ==1:
-            fp+=1
-        elif i==1 and j ==0:
-            fn+=1
-        elif i==0 and j ==0:
-            tn+=1
-    p = (tp)/(tp+fp)
-    r = (tp)/(tp+fn)
-    #print(tp,tn,fp,fn)
-    eval_f1 = 2*p*r/(p+r)
+    
+    eval_prec = precision_score(labels, preds, average='weighted')
+    eval_recall = recall_score(labels, preds, average='weighted')
+    eval_f1 = f1_score(labels, preds, average='weighted')
 
     result = {
         "eval_acc":round(100*eval_acc,2),
         "eval_f1":round(100*eval_f1,2),
-        "eval_p":round(100*p,2),
-        "eval_r":round(100*r,2),
+        "eval_p":round(100*eval_prec,2),
+        "eval_r":round(100*eval_recall,2),
     }
     return result
     
@@ -542,7 +512,7 @@ def main():
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                                           cache_dir=args.cache_dir if args.cache_dir else None)
-    config.num_labels=1
+    config.num_labels=800
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name,
                                                 do_lower_case=args.do_lower_case,
                                                 cache_dir=args.cache_dir if args.cache_dir else None)
@@ -587,7 +557,6 @@ def main():
     results = {}
     if args.do_eval and args.local_rank in [-1, 0]:
         checkpoint_prefix = 'checkpoint-best-acc/model.bin'
-
         output_dir = os.path.join(args.output_dir, '{}'.format(checkpoint_prefix))  
         model.load_state_dict(torch.load(output_dir))      
         model.to(args.device)
@@ -597,7 +566,6 @@ def main():
             logger.info("  %s = %s", key, str(round(result[key],4)))
             
     if args.do_test and args.local_rank in [-1, 0]:
-        # checkpoint_prefix = 'l2_checkpoint-best-acc/model.bin'
         checkpoint_prefix = 'checkpoint-best-acc/model.bin'
         files=[]
         if args.test_data_file is not None:

@@ -34,6 +34,10 @@ from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampl
 from torch.utils.data.distributed import DistributedSampler
 from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                           RobertaConfig, RobertaModel, RobertaTokenizer, T5Config, T5ForConditionalGeneration)
+from construct_exemplar import construct_exemplars_ours, calculate_coefficient
+from construct_exemplar_grad import construct_exemplars_grad
+from ewc import *
+from copy import deepcopy
 
 MODEL_CLASSES = {'roberta': (RobertaConfig, RobertaModel, RobertaTokenizer)}
 
@@ -50,14 +54,16 @@ class Example(object):
 
     def __init__(self,
                  idx,
-                 source1,
-                 source2,
+                 source,
                  target,
+                 origin_source,
+                 origin_target
                  ):
         self.idx = idx
-        self.source1 = source1
-        self.source2 = source2
+        self.source = source
         self.target = target
+        self.origin_source = origin_source
+        self.origin_target = origin_target
 
 
 def read_examples(filename):
@@ -71,15 +77,15 @@ def read_examples(filename):
             js = json.loads(line)
             if 'idx' not in js:
                 js['idx'] = idx
-            code1 = js['code1']
-            code2 = js['code2']
-            nl = 'true' if int(js['label']) == 1 else 'false'
+            code = js['func_before']
+            nl = 'true' if int(js['vul']) == 1 else 'false'
             examples.append(
                 Example(
                     idx=idx,
-                    source1=code1,
-                    source2=code2,
+                    source=task_prefix + code,
                     target=nl,
+                    origin_source=js['func_before'],
+                    origin_target=js['vul'],
                 )
             )
 
@@ -108,25 +114,14 @@ def convert_examples_to_features(examples, tokenizer, args, stage=None):
     features = []
     for example_index, example in enumerate(examples):
         # source
-        source_tokens1 = tokenizer.tokenize(example.source1)[:256 - 2]
-        source_tokens1 = [tokenizer.cls_token] + source_tokens1 + [tokenizer.sep_token]
-        source_ids1 = tokenizer.convert_tokens_to_ids(source_tokens1)
-        padding_length1 = 256 - len(source_ids1)
-        source_ids1+=[tokenizer.pad_token_id]*padding_length1
-        source_mask1 = [1] * (len(source_tokens1))
-        source_mask1 += [0] * padding_length1
-        
-        source_tokens2 = tokenizer.tokenize(example.source2)[:256 - 2]
-        source_tokens2 = [tokenizer.cls_token] + source_tokens2 + [tokenizer.sep_token]
-        source_ids2 = tokenizer.convert_tokens_to_ids(source_tokens2)
-        padding_length2 = 256 - len(source_ids2)
-        source_ids2+=[tokenizer.pad_token_id]*padding_length2
-        source_mask2 = [1] * (len(source_tokens2))
-        source_mask2 += [0] * padding_length2
-
-        source_tokens = source_tokens1 + source_tokens2
-        source_ids = source_ids1 + source_ids2
-        source_mask = source_mask1 + source_mask2
+        source_tokens = tokenizer.tokenize(example.source)[:args.max_source_length - 2]
+        source_tokens = [tokenizer.cls_token] + source_tokens + [tokenizer.sep_token]
+        source_ids = tokenizer.convert_tokens_to_ids(source_tokens)
+        # 加mask
+        source_mask = [1] * (len(source_tokens))
+        padding_length = args.max_source_length - len(source_ids)
+        source_ids += [tokenizer.pad_token_id] * padding_length
+        source_mask += [0] * padding_length
 
         # target
         if stage == "test":
@@ -186,6 +181,17 @@ def main():
                         help="The output directory where the model predictions and checkpoints will be written.")
     parser.add_argument("--load_model_path", default=None, type=str,
                         help="Path to trained model: Should contain the .bin files")
+    parser.add_argument("--lang", default=None, type=str,
+                        help="language to summarize")
+    parser.add_argument("--mode_name", default="", type=str, help="Mode")
+    parser.add_argument("--task_id", default=0, type=int, help="The id of current task.")
+    parser.add_argument("--ewc_weight", default=1, type=int, help="The weight of EWC penalty.")
+    parser.add_argument("--train_examplar_path", default="", type=str, help="Path of training examplars.")
+    parser.add_argument("--eval_examplar_path", default="", type=str, help="Path of valid examplars.")
+    parser.add_argument("--train_replay_size", default=100, type=int, help="The size of replayed training examplars.")
+    parser.add_argument("--eval_replay_size", default=25, type=int, help="The size of replayed valid examplars.")
+    parser.add_argument("--k", default=5, type=int, help="Hyperparameter")
+    parser.add_argument("--mu", default=5, type=int, help="Hyperparameter")
     ## Other parameters
     parser.add_argument("--train_filename", default=None, type=str,
                         help="The train filename. Should contain the .jsonl files for this task.")
@@ -215,8 +221,6 @@ def main():
                         help="Set this flag if you are using an uncased model.")
     parser.add_argument("--no_cuda", action='store_true',
                         help="Avoid using CUDA when available")
-    parser.add_argument("--lang", default=None, type=str,
-                        help="language to summarize")
 
     parser.add_argument("--train_batch_size", default=8, type=int,
                         help="Batch size per GPU/CPU for training.")
@@ -246,7 +250,7 @@ def main():
                         help="Linear warmup over warmup_steps.")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank")
-    parser.add_argument('--seed', type=int, default=123456,
+    parser.add_argument('--seed', type=int, default=42,
                         help="random seed for initialization")
     parser.add_argument('--visible_gpu', type=str, default="",
                         help="use how many gpus")
@@ -255,7 +259,7 @@ def main():
     args = parser.parse_args()
     logger.info(args)
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_gpu
+    # os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_gpu
 
     # Setup CUDA, GPU & distributed training
     if args.local_rank == -1 or args.no_cuda:
@@ -272,6 +276,7 @@ def main():
                    args.local_rank, device, args.n_gpu, bool(args.local_rank != -1))
 
     args.device = device
+    args.eval_replay_size = args.train_replay_size//8
 
     # Set seed
     set_seed(args.seed)
@@ -288,6 +293,29 @@ def main():
         model.load_state_dict(torch.load(args.load_model_path))
 
     model.to(device)
+
+    #########  冻结大部分层  #########
+    param_optimizer = list(model.named_parameters())
+
+    frozen = [
+        
+    ]
+    param_influence = []
+    for n, p in param_optimizer:
+        # print(n)
+        if (not any(fr in n for fr in frozen)):
+            param_influence.append(p)
+        elif 'roberta.embeddings.word_embeddings.' in n:
+            pass # need gradients through embedding layer for computing saliency map
+        else:
+            p.requires_grad = False
+    ####################
+
+    param_size = 0
+    for p in param_influence:
+        tmp_p = p.clone().detach()
+        param_size += torch.numel(tmp_p)
+    logger.info("  Parameter size = %d", param_size)
 
     if args.local_rank != -1:
         # Distributed training
@@ -309,9 +337,12 @@ def main():
     if args.do_train:
         # Prepare training data loader
         train_examples = read_examples(args.train_filename)
-
+        origin_train_examples = deepcopy(train_examples)
+        if args.task_id>0:
+            train_replay_examples = read_examples(args.train_examplar_path)
+            if 'emr' in args.mode_name or args.mode_name in ['hybird']:
+                train_examples.extend(train_replay_examples)
         train_features = convert_examples_to_features(train_examples, tokenizer, args, stage='train')
-
         all_source_ids = torch.tensor([f.source_ids for f in train_features], dtype=torch.long)
         all_source_mask = torch.tensor([f.source_mask for f in train_features], dtype=torch.long)
         all_target_ids = torch.tensor([f.target_ids for f in train_features], dtype=torch.long)
@@ -350,177 +381,222 @@ def main():
         dev_dataset = {}
         nb_tr_examples, nb_tr_steps, tr_loss, global_step, best_bleu, best_loss = 0, 0, 0, 0, 0, 1e6
         best_f1 = 0
-        for epoch in range(args.num_train_epochs):
 
-            bar = tqdm(train_dataloader, total=len(train_dataloader))
+        if args.task_id>0 and 'ewc' in args.mode_name:
+            adaptive_weight = calculate_coefficient(origin_train_examples, train_replay_examples)
+            #adaptive_weight=1
+        else:
+            adaptive_weight=1
+        logger.info("  Adaptive weight = %f", adaptive_weight)
 
-            for batch in bar:
-                batch = tuple(t.to(device) for t in batch)
-                source_ids, source_mask, target_ids, target_mask = batch
-                labels = [
-                    [(label if label != tokenizer.pad_token_id else -100) for label in labels_example] for
-                    labels_example in target_ids
-                ]
-                labels = torch.tensor(labels).to(device)
-
-                out = model(input_ids=source_ids, attention_mask=source_mask, labels=labels)
-                loss = out.loss
-
-                if args.n_gpu > 1:
-                    loss = loss.mean()  # mean() to average on multi-gpu.
-                if args.gradient_accumulation_steps > 1:
-                    loss = loss / args.gradient_accumulation_steps
-
-                tr_loss += loss.item()
-                train_loss = round(tr_loss * args.gradient_accumulation_steps / (nb_tr_steps + 1), 4)
-                bar.set_description("epoch {} loss {}".format(epoch, train_loss))
-
-                nb_tr_examples += source_ids.size(0)
-                nb_tr_steps += 1
-                loss.backward()
-                if (nb_tr_steps + 1) % 100 == 0:
-                    logger.info("Epoch {}, step {}, train loss {}".format(epoch, nb_tr_steps, train_loss))
-                if (nb_tr_steps + 1) % args.gradient_accumulation_steps == 0:
-                    # Update parameters
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    scheduler.step()
-                    global_step += 1
-
-            if args.do_eval:
-                # Eval model with dev dataset
-                tr_loss = 0
-                nb_tr_examples, nb_tr_steps = 0, 0
-                eval_flag = False
-                if 'dev_loss' in dev_dataset:
-                    eval_examples, eval_data = dev_dataset['dev_loss']
-                else:
-                    eval_examples = read_examples(args.dev_filename)
-                    eval_features = convert_examples_to_features(eval_examples, tokenizer, args, stage='dev')
-                    all_source_ids = torch.tensor([f.source_ids for f in eval_features], dtype=torch.long)
-                    all_source_mask = torch.tensor([f.source_mask for f in eval_features], dtype=torch.long)
-                    all_target_ids = torch.tensor([f.target_ids for f in eval_features], dtype=torch.long)
-                    all_target_mask = torch.tensor([f.target_mask for f in eval_features], dtype=torch.long)
-                    eval_data = TensorDataset(all_source_ids, all_source_mask, all_target_ids, all_target_mask)
-                    dev_dataset['dev_loss'] = eval_examples, eval_data
-                eval_sampler = SequentialSampler(eval_data)
-                eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-
-                logger.info("\n***** Running evaluation *****")
-                logger.info("  Num examples = %d", len(eval_examples))
-                logger.info("  Batch size = %d", args.eval_batch_size)
-
-                # Start Evaling model
-                model.eval()
-                eval_loss, tokens_num = 0, 0
-                for batch in eval_dataloader:
+        if args.task_id>0:
+            for epoch in range(args.num_train_epochs):
+    
+                bar = tqdm(train_dataloader, total=len(train_dataloader))
+                if 'ewc' in args.mode_name and args.task_id>0:
+                    replay_examples = train_replay_examples
+                    replay_features = convert_examples_to_features(replay_examples, tokenizer, args, stage='train')
+                    replay_all_source_ids = torch.tensor([f.source_ids for f in replay_features], dtype=torch.long)
+                    replay_all_source_mask = torch.tensor([f.source_mask for f in replay_features], dtype=torch.long)
+                    replay_all_target_ids = torch.tensor([f.target_ids for f in replay_features], dtype=torch.long)
+                    replay_all_target_mask = torch.tensor([f.target_mask for f in replay_features], dtype=torch.long)
+                    replay_data = TensorDataset(replay_all_source_ids, replay_all_source_mask, replay_all_target_ids, replay_all_target_mask)
+                    replay_sampler = SequentialSampler(replay_data)
+                    replay_dataloader = DataLoader(replay_data, sampler=replay_sampler, batch_size=1)
+                    ewc = EWC(model, replay_dataloader, device, len(replay_examples), tokenizer)
+    
+                for batch in bar:
                     batch = tuple(t.to(device) for t in batch)
                     source_ids, source_mask, target_ids, target_mask = batch
-
-                    with torch.no_grad():
-                        labels = [
-                            [(label if label != tokenizer.pad_token_id else -100) for label in labels_example] for
-                            labels_example in target_ids
-                        ]
-                        labels = torch.tensor(labels).to(device)
-
-                        tokens_num += torch.tensor([(labels_example != -100).sum().item() for labels_example in labels]).sum().item()
-
-                        loss = model(input_ids=source_ids, attention_mask=source_mask, labels=labels).loss
-                    eval_loss += loss.sum().item()
-                    # tokens_num += num.sum().item()
-                # Pring loss of dev dataset
-                model.train()
-                eval_loss = eval_loss/tokens_num
-                result = {'eval_ppl': round(np.exp(eval_loss), 5),
-                          'global_step': global_step + 1,
-                          'train_loss': round(train_loss, 5)}
-                for key in sorted(result.keys()):
-                    logger.info("  %s = %s", key, str(result[key]))
-                logger.info("  " + "*" * 20)
-
-                # save last checkpoint
-                last_output_dir = os.path.join(args.output_dir, 'checkpoint-last')
-                if not os.path.exists(last_output_dir):
-                    os.makedirs(last_output_dir)
-                model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-                output_model_file = os.path.join(last_output_dir, "pytorch_model.bin")
-                torch.save(model_to_save.state_dict(), output_model_file)
-
-                # Calculate bleu
-                if 'dev_bleu' in dev_dataset:
-                    eval_examples, eval_data = dev_dataset['dev_bleu']
-                else:
-                    eval_examples = read_examples(args.dev_filename)
-                    eval_features = convert_examples_to_features(eval_examples, tokenizer, args, stage='test')
-                    all_source_ids = torch.tensor([f.source_ids for f in eval_features], dtype=torch.long)
-                    all_source_mask = torch.tensor([f.source_mask for f in eval_features], dtype=torch.long)
-                    eval_data = TensorDataset(all_source_ids, all_source_mask)
-                    dev_dataset['dev_bleu'] = eval_examples, eval_data
-
-                eval_sampler = SequentialSampler(eval_data)
-                eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-
-                model.eval()
-                p = []
-                for batch in eval_dataloader:
-                    batch = tuple(t.to(device) for t in batch)
-                    source_ids, source_mask = batch
-                    with torch.no_grad():
-                        preds = model.generate(input_ids=source_ids, attention_mask=source_mask, max_length=5)
-
-                        for pred in preds:
-                            text = tokenizer.decode(pred, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-                            p.append(text)
-
-                model.train()
-                predictions = []
-                sum1 = 0
-                tp=0
-                tn=0
-                fp=0
-                fn=0
-                with open(os.path.join(args.output_dir, "dev.output"), 'w') as f, open(
-                        os.path.join(args.output_dir, "dev.gold"), 'w') as f1:
-                    for ref, gold in zip(p, eval_examples):
-                        predictions.append(str(gold.idx) + '\t' + ref)
-                        f.write(str(gold.idx) + '\t' + ref + '\n')
-                        f1.write(str(gold.idx) + '\t' + gold.target + '\n')
-                        if ref==gold.target:
-                            sum1+=1
-                        if ref==gold.target:
-                            sum1+=1
-                        if ref=='true' and gold.target =='true':
-                            tp+=1
-                        elif ref=='true' and gold.target =='false':
-                            fn+=1
-                        elif ref=='false' and gold.target =='false':
-                            tn+=1
-                        elif ref=='false' and gold.target =='true':
-                            fp+=1
-                p = (tp+1)/(1+tp+fp)
-                r = (tp+1)/(1+tp+fn)
-                f1= 2*p*r/(p+r)
-                logger.info("Epoch {}, the accuracy is {}".format(epoch, f1))
-                print(tp,tn,fp,fn)
-                print('Current F1: ', f1)
-                print('Best F1: ', best_f1)
-                if best_f1 < f1:
-                    best_f1 = f1
-                    # Save best checkpoint for best ppl
-                    output_dir = os.path.join(args.output_dir, 'checkpoint-best-f1')
-                    if not os.path.exists(output_dir):
-                        os.makedirs(output_dir)
+                    labels = [
+                        [(label if label != tokenizer.pad_token_id else -100) for label in labels_example] for
+                        labels_example in target_ids
+                    ]
+                    labels = torch.tensor(labels).to(device)
+    
+                    out = model(input_ids=source_ids, attention_mask=source_mask, labels=labels)
+                    loss = out.loss
+                    if args.task_id>0 and 'ewc' in args.mode_name:
+                        ewc_loss = ewc.penalty(model)
+                        loss = loss+args.ewc_weight * adaptive_weight * ewc_loss
+    
+                    if args.n_gpu > 1:
+                        loss = loss.mean()  # mean() to average on multi-gpu.
+                    if args.gradient_accumulation_steps > 1:
+                        loss = loss / args.gradient_accumulation_steps
+    
+                    tr_loss += loss.item()
+                    train_loss = round(tr_loss * args.gradient_accumulation_steps / (nb_tr_steps + 1), 4)
+                    bar.set_description("epoch {} loss {}".format(epoch, train_loss))
+    
+                    nb_tr_examples += source_ids.size(0)
+                    nb_tr_steps += 1
+                    loss.backward()
+                    if (nb_tr_steps + 1) % 100 == 0:
+                        logger.info("Epoch {}, step {}, train loss {}".format(epoch, nb_tr_steps, train_loss))
+                    if (nb_tr_steps + 1) % args.gradient_accumulation_steps == 0:
+                        # Update parameters
+                        optimizer.step()
+                        optimizer.zero_grad()
+                        scheduler.step()
+                        global_step += 1
+    
+                if args.do_eval:
+                    # Eval model with dev dataset
+                    tr_loss = 0
+                    nb_tr_examples, nb_tr_steps = 0, 0
+                    eval_flag = False
+                    if 'dev_loss' in dev_dataset:
+                        eval_examples, eval_data = dev_dataset['dev_loss']
+                    else:
+                        eval_examples = read_examples(args.dev_filename)
+                        origin_eval_examples = deepcopy(eval_examples)
+                        if args.task_id>0:
+                            eval_replay_examples = read_examples(args.eval_examplar_path)
+                            if 'emr' in args.mode_name or args.mode_name in ['hybird']:
+                                eval_examples.extend(eval_replay_examples)
+                        eval_features = convert_examples_to_features(eval_examples, tokenizer, args, stage='dev')
+                        all_source_ids = torch.tensor([f.source_ids for f in eval_features], dtype=torch.long)
+                        all_source_mask = torch.tensor([f.source_mask for f in eval_features], dtype=torch.long)
+                        all_target_ids = torch.tensor([f.target_ids for f in eval_features], dtype=torch.long)
+                        all_target_mask = torch.tensor([f.target_mask for f in eval_features], dtype=torch.long)
+                        eval_data = TensorDataset(all_source_ids, all_source_mask, all_target_ids, all_target_mask)
+                        dev_dataset['dev_loss'] = eval_examples, eval_data
+                    eval_sampler = SequentialSampler(eval_data)
+                    eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+    
+                    logger.info("\n***** Running evaluation *****")
+                    logger.info("  Num examples = %d", len(eval_examples))
+                    logger.info("  Batch size = %d", args.eval_batch_size)
+    
+                    # Start Evaling model
+                    model.eval()
+                    eval_loss, tokens_num = 0, 0
+                    for batch in eval_dataloader:
+                        batch = tuple(t.to(device) for t in batch)
+                        source_ids, source_mask, target_ids, target_mask = batch
+    
+                        with torch.no_grad():
+                            labels = [
+                                [(label if label != tokenizer.pad_token_id else -100) for label in labels_example] for
+                                labels_example in target_ids
+                            ]
+                            labels = torch.tensor(labels).to(device)
+    
+                            tokens_num += torch.tensor([(labels_example != -100).sum().item() for labels_example in labels]).sum().item()
+    
+                            loss = model(input_ids=source_ids, attention_mask=source_mask, labels=labels).loss
+                        eval_loss += loss.sum().item()
+                        # tokens_num += num.sum().item()
+                    # Pring loss of dev dataset
+                    model.train()
+                    eval_loss = eval_loss/tokens_num
+                    result = {'eval_ppl': round(np.exp(eval_loss), 5),
+                              'global_step': global_step + 1,
+                              'train_loss': round(train_loss, 5)}
+                    for key in sorted(result.keys()):
+                        logger.info("  %s = %s", key, str(result[key]))
+                    logger.info("  " + "*" * 20)
+    
+                    # save last checkpoint
+                    last_output_dir = os.path.join(args.output_dir, 'checkpoint-last')
+                    if not os.path.exists(last_output_dir):
+                        os.makedirs(last_output_dir)
                     model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-                    output_model_file = os.path.join(output_dir, "pytorch_model.bin")
-                    torch.save(model_to_save.state_dict(), output_model_file)
-                
+                    output_model_file = os.path.join(last_output_dir, "pytorch_model.bin")
+    
+                    # Calculate bleu
+                    if 'dev_bleu' in dev_dataset:
+                        eval_examples, eval_data = dev_dataset['dev_bleu']
+                    else:
+                        eval_examples = read_examples(args.dev_filename)
+                        origin_eval_examples = deepcopy(eval_examples)
+                        if args.task_id>0:
+                            eval_replay_examples = read_examples(args.eval_examplar_path)
+                            if 'emr' in args.mode_name or args.mode_name in ['hybird']:
+                                eval_examples.extend(eval_replay_examples)
+                        eval_features = convert_examples_to_features(eval_examples, tokenizer, args, stage='test')
+                        all_source_ids = torch.tensor([f.source_ids for f in eval_features], dtype=torch.long)
+                        all_source_mask = torch.tensor([f.source_mask for f in eval_features], dtype=torch.long)
+                        eval_data = TensorDataset(all_source_ids, all_source_mask)
+                        dev_dataset['dev_bleu'] = eval_examples, eval_data
+    
+                    eval_sampler = SequentialSampler(eval_data)
+                    eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+    
+                    model.eval()
+                    p = []
+                    for batch in eval_dataloader:
+                        batch = tuple(t.to(device) for t in batch)
+                        source_ids, source_mask = batch
+                        with torch.no_grad():
+                            preds = model.generate(input_ids=source_ids, attention_mask=source_mask, max_length=5)
+    
+                            for pred in preds:
+                                text = tokenizer.decode(pred, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+                                p.append(text)
+                    model.train()
+                    predictions = []
+                    sum1 = 0
+                    tp=0
+                    tn=0
+                    fp=0
+                    fn=0
+                    with open(os.path.join(args.output_dir, "dev.output"), 'w') as f, open(
+                            os.path.join(args.output_dir, "dev.gold"), 'w') as f1:
+                        for ref, gold in zip(p, eval_examples):
+                            predictions.append(str(gold.idx) + '\t' + ref)
+                            f.write(str(gold.idx) + '\t' + ref + '\n')
+                            f1.write(str(gold.idx) + '\t' + gold.target + '\n')
+                            if ref==gold.target:
+                                sum1+=1
+                            if ref==gold.target:
+                                sum1+=1
+                            if ref=='true' and gold.target =='true':
+                                tp+=1
+                            elif ref=='true' and gold.target =='false':
+                                fn+=1
+                            elif ref=='false' and gold.target =='false':
+                                tn+=1
+                            elif ref=='false' and gold.target =='true':
+                                fp+=1
+                    p = (tp+1)/(1+tp+fp)
+                    r = (tp+1)/(1+tp+fn)
+                    f1= 2*p*r/(p+r)
+                    logger.info("Epoch {}, the accuracy is {}".format(epoch, f1))
+                    print(tp,tn,fp,fn)
+                    print('Current F1: ', f1)
+                    print('Best F1: ', best_f1)
+                    if best_f1 < f1:
+                        best_f1 = f1
+                        # Save best checkpoint for best ppl
+                        output_dir = os.path.join(args.output_dir, 'checkpoint-best-f1')
+                        if not os.path.exists(output_dir):
+                            os.makedirs(output_dir)
+                        model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
+                        output_model_file = os.path.join(output_dir, "pytorch_model.bin")
+                        torch.save(model_to_save.state_dict(), output_model_file)
+        else:
+            output_dir = os.path.join(args.output_dir, 'checkpoint-best-f1')
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            model_to_save = model.module if hasattr(model, 'module') else model
+            output_model_file = os.path.join(output_dir, "pytorch_model.bin")
+            torch.save(model_to_save.state_dict(), output_model_file)
+            eval_examples = read_examples(args.dev_filename)
+            origin_eval_examples = deepcopy(eval_examples)
+
+        if 'emr' in args.mode_name or 'ewc' in args.mode_name or args.mode_name in ['hybird']:
+            # construct_exemplars_ours(model_to_save,args,origin_train_examples,origin_eval_examples,tokenizer,device,'ours')
+            construct_exemplars_grad(model_to_save,args,origin_train_examples,origin_eval_examples,tokenizer,device, param_influence, 'ours')
+                    
 
     if args.do_test:
         files = []
+        if args.dev_filename is not None:
+            files.append(args.dev_filename)
         if args.test_filename is not None:
-            for file_name in args.test_filename.split(','):
-                files.append(file_name)
+            files.append(args.test_filename)
         for idx, file in enumerate(files):
             logger.info("Test file: {}".format(file))
             eval_examples = read_examples(file)
@@ -544,7 +620,7 @@ def main():
                     for pred in preds:
                         text = tokenizer.decode(pred, skip_special_tokens=True, clean_up_tokenization_spaces=False)
                         p.append(text)
-    
+
             model.train()
             predictions = []
             sum1=0
@@ -563,19 +639,16 @@ def main():
                     if ref=='true' and gold.target =='true':
                         tp+=1
                     elif ref=='true' and gold.target =='false':
-                        fn+=1
-                    elif ref=='false' and gold.target =='false':
-                        tn+=1
-                    elif ref=='false' and gold.target =='true':
                         fp+=1
+                    elif ref=='false' and gold.target =='false':
+                        fn+=1
+                    elif ref=='false' and gold.target =='true':
+                        tn+=1
                     
-            print("The accuracy is {}".format(sum1/len(eval_examples)))
+            logger.info("Epoch {}, the accuracy is {}".format(epoch, sum1/len(eval_examples)))
             p = tp/(tp+fp)
             r = tp/(tp+fn)
-            print(tp,tn,fp,fn)
-            print("Precision is {}".format(p))
-            print("Recall is {}".format(r))
-            print("F1 is {}".format(2*p*r/(p+r)))
+            logger.info("Epoch {}, the F1 is {}".format(epoch, 2*p*r/(p+r)))
             
 
 

@@ -31,6 +31,7 @@ from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                           RobertaConfig, RobertaForSequenceClassification, RobertaTokenizer,
                           DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer)
 from construct_exemplar import construct_exemplars, calculate_coefficient, construct_exemplars_ours
+from construct_exemplar_grad import construct_exemplars_grad
 from ewc import *
 
 logger = logging.getLogger(__name__)
@@ -120,7 +121,7 @@ def set_seed(seed=42):
     torch.backends.cudnn.deterministic = True
 
 
-def train(args, train_dataset, model, tokenizer):
+def train(args, train_dataset, model, tokenizer, param_influence):
     """ Train the model """ 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
@@ -281,7 +282,8 @@ def train(args, train_dataset, model, tokenizer):
         train_replay_examples = train_dataset.origin_data
         eval_replay_examples = eval_dataset.origin_data
         #construct_exemplars(model_to_save,args,train_replay_examples,eval_replay_examples,'random')
-        construct_exemplars_ours(model_to_save,args,train_replay_examples,eval_replay_examples,tokenizer,args.device,'ours')
+        # construct_exemplars_ours(model_to_save,args,train_replay_examples,eval_replay_examples,tokenizer,args.device,'ours')
+        construct_exemplars_grad(model_to_save,args,train_replay_examples,eval_replay_examples,tokenizer,args.device, param_influence, 'ours')
 
 
 
@@ -597,6 +599,37 @@ def main():
             logger.info("reload model from {}".format(args.load_model_path))
             model.load_state_dict(torch.load(args.load_model_path))
             model.to(args.device)
+
+        #########  冻结大部分层  #########
+        param_optimizer = list(model.named_parameters())
+
+        # 冻结6层试试，之前是7层
+        # frozen = [
+        #     "encoder.roberta.embeddings",
+        #     "encoder.roberta.encoder.layer.0",
+        #     "encoder.roberta.encoder.layer.1",
+        #     "encoder.roberta.encoder.layer.2",
+        #     "encoder.roberta.encoder.layer.3",
+        # ]
+        frozen = [
+            
+        ]
+        param_influence = []
+        for n, p in param_optimizer:
+            # print(n)
+            if (not any(fr in n for fr in frozen)):
+                param_influence.append(p)
+            elif 'roberta.embeddings.word_embeddings.' in n:
+                pass # need gradients through embedding layer for computing saliency map
+            else:
+                p.requires_grad = False
+        ####################
+
+        param_size = 0
+        for p in param_influence:
+            tmp_p = p.clone().detach()
+            param_size += torch.numel(tmp_p)
+        logger.info("  Parameter size = %d", param_size)
         
         if args.local_rank not in [-1, 0]:
             torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training process the dataset, and the others will use the cache
@@ -608,7 +641,7 @@ def main():
         if args.local_rank == 0:
             torch.distributed.barrier()
 
-        train(args, train_dataset, model, tokenizer)
+        train(args, train_dataset, model, tokenizer, param_influence)
 
 
 

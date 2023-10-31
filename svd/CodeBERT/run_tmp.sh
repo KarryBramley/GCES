@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES=2
+export CUDA_VISIBLE_DEVICES=0
 name=emr_ours_adaewc
 train_replay_size=1509
 weight=2000

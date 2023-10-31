@@ -35,6 +35,7 @@ from torch.utils.data.distributed import DistributedSampler
 from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                           RobertaConfig, RobertaModel, RobertaTokenizer, T5Config, T5ForConditionalGeneration)
 from construct_exemplar import construct_exemplars_ours, calculate_coefficient
+from construct_exemplar_grad import construct_exemplars_grad
 from ewc import *
 from copy import deepcopy
 
@@ -135,7 +136,7 @@ def convert_examples_to_features(examples, tokenizer, args, stage=None):
         target_mask += [0] * padding_length
 
         if example_index < 5:
-            if stage == 'train':
+            if stage == 'train' and False:
                 logger.info("*** Example ***")
                 logger.info("idx: {}".format(example.idx))
 
@@ -258,7 +259,7 @@ def main():
     args = parser.parse_args()
     logger.info(args)
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_gpu
+    # os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_gpu
 
     # Setup CUDA, GPU & distributed training
     if args.local_rank == -1 or args.no_cuda:
@@ -292,6 +293,29 @@ def main():
         model.load_state_dict(torch.load(args.load_model_path))
 
     model.to(device)
+
+    #########  冻结大部分层  #########
+    param_optimizer = list(model.named_parameters())
+
+    frozen = [
+        
+    ]
+    param_influence = []
+    for n, p in param_optimizer:
+        # print(n)
+        if (not any(fr in n for fr in frozen)):
+            param_influence.append(p)
+        elif 'roberta.embeddings.word_embeddings.' in n:
+            pass # need gradients through embedding layer for computing saliency map
+        else:
+            p.requires_grad = False
+    ####################
+
+    param_size = 0
+    for p in param_influence:
+        tmp_p = p.clone().detach()
+        param_size += torch.numel(tmp_p)
+    logger.info("  Parameter size = %d", param_size)
 
     if args.local_rank != -1:
         # Distributed training
@@ -563,8 +587,8 @@ def main():
             origin_eval_examples = deepcopy(eval_examples)
 
         if 'emr' in args.mode_name or 'ewc' in args.mode_name or args.mode_name in ['hybird']:
-            construct_exemplars_ours(model_to_save,args,origin_train_examples,origin_eval_examples,tokenizer,device,'ours')
-
+            # construct_exemplars_ours(model_to_save,args,origin_train_examples,origin_eval_examples,tokenizer,device,'ours')
+            construct_exemplars_grad(model_to_save,args,origin_train_examples,origin_eval_examples,tokenizer,device, param_influence, 'ours')
                     
 
     if args.do_test:
