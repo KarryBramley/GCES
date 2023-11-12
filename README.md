@@ -1,14 +1,5 @@
-# REPEAT 
-This is an implemention for our ICSE 2023 paper based on pytorch
-
-Keeping Pace with Ever-Increasing Data: Towards Continual Learning of Code Intelligence Models
-
-by Shuzheng Gao, Hongyu Zhang, Cuiyun Gao and Chaozheng Wang
-
-
 # Introduction 
-REPEAT is a general training method for continual learning of code intelligence models.
-
+ESGE is a exemplar selection method for continual learning of code intelligence models.
 
 
 # Data
@@ -89,21 +80,6 @@ Upper bound:
 
 ```bash
 bash run_ous.sh
-```
-
-
-## Citation  
-
-If you use our code, please kindly cite:
-
-```
-@inproceedings{Gao2023repeat,
-  title={Keeping Pace with Ever-Increasing Data: Towards Continual Learning of Code Intelligence Models},
-  author={Shuzheng Gao, Hongyu Zhang, Cuiyun Gao, and Chaozheng Wang},
-  booktitle={ICSE},
-  year={2023},
-  publisher={IEEE}
-}
 ```
 
 
