@@ -3,7 +3,6 @@ name=finetune
 pretrained_model="microsoft/codebert-base"
 
 #train
-# 这里task_0的block_size改成了256
 train_data_file=../POJ_clone/binary/train_0.jsonl
 eval_data_file=../POJ_clone/binary/dev_0.jsonl
 output_dir=./saved_models/$name/task_0
@@ -22,8 +21,7 @@ python run.py \
     --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
     --evaluate_during_training \
-    --seed 123456
-
+    --seed 123456  2>&1 | tee train.log
 #generate
 data_dir=../POJ_clone/binary
 test_data_file=$data_dir/test_0.jsonl
@@ -43,4 +41,4 @@ python run.py \
     --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
     --evaluate_during_training \
-    --seed 123456
+    --seed 123456 2>&1 | tee test.log

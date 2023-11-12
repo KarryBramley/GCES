@@ -104,13 +104,21 @@ def set_seed(seed=42):
 
 
 def train(args, train_dataset, model, tokenizer):
-    el2n_score = pickle.load(open("./saved_models/emr_ours_adaewc/task_0/l2_score/el2n_score_" + str(0) + ".pkl", "rb"))
-    train_idx_sorted = list(np.argsort(el2n_score))
+    # fraction by EL2N
+    # el2n_score = pickle.load(open("./saved_models/emr_ours_adaewc/task_0/l2_score/el2n_score_" + str(0) + ".pkl", "rb"))
+    # train_idx_sorted = list(np.argsort(el2n_score))
 
-    start_idx = int(len(el2n_score) * 0.4)
-    # subset_size = int(len(el2n_score) * 0.4)
-    selected_train_idx = train_idx_sorted[start_idx: ]
-    train_dataset = [te for tei, te in enumerate(train_dataset) if tei in selected_train_idx]
+    # start_idx = int(len(el2n_score) * 0.4)
+    # selected_train_idx = train_idx_sorted[start_idx: ]
+    # train_dataset = [te for tei, te in enumerate(train_dataset) if tei in selected_train_idx]
+
+    # fraction by random
+    fraction_ratio = 0.7
+    train_len = len(train_dataset)
+    frac_idx = random.sample(range(train_len), int(fraction_ratio * train_len))
+    print(frac_idx[:10])
+    train_dataset = [te for tei, te in enumerate(train_dataset) if tei not in frac_idx]
+
 
     """ Train the model """ 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
@@ -234,7 +242,8 @@ def train(args, train_dataset, model, tokenizer):
                         logger.info("  Best acc:%s",round(best_acc,4))
                         logger.info("  "+"*"*20)                          
                         
-                        checkpoint_prefix = 'l2_checkpoint-best-acc'
+                        # checkpoint_prefix = 'l2_checkpoint-best-acc'
+                        checkpoint_prefix = 'rd_checkpoint-best-acc'
                         # checkpoint_prefix = 'checkpoint-best-acc'
                         output_dir = os.path.join(args.output_dir, '{}'.format(checkpoint_prefix))                        
                         if not os.path.exists(output_dir):
@@ -598,7 +607,8 @@ def main():
             
     if args.do_test and args.local_rank in [-1, 0]:
         # checkpoint_prefix = 'l2_checkpoint-best-acc/model.bin'
-        checkpoint_prefix = 'checkpoint-best-acc/model.bin'
+        checkpoint_prefix = 'rd_checkpoint-best-acc/model.bin'
+        # checkpoint_prefix = 'checkpoint-best-acc/model.bin'
         files=[]
         if args.test_data_file is not None:
             for file_name in args.test_data_file.split(','):

@@ -117,9 +117,16 @@ def set_seed(seed=42):
 
 
 def train(args, train_dataset, model, tokenizer):
-    influences = pickle.load(open("./saved_models/emr_ours_adaewc/task_0/l2_score/el2n_score_" + str(0) + ".pkl", "rb"))
+    # influences = pickle.load(open("./saved_models/emr_ours_adaewc/task_0/l2_score/el2n_score_" + str(0) + ".pkl", "rb"))
 
-    train_idx_sorted = list(np.argsort(influences))
+    # train_idx_sorted = list(np.argsort(influences))
+
+    # fraction by random
+    # fraction_ratio = 0.7
+    # train_len = len(train_dataset)
+    # frac_idx = random.sample(range(train_len), int(fraction_ratio * train_len))
+    # print(frac_idx[:10])
+    # train_dataset = [te for tei, te in enumerate(train_dataset) if tei not in frac_idx]
 
     # start_idx = int(len(influences) * 0.45)
     # subset_size = int(len(influences) * 0.4)
@@ -249,7 +256,8 @@ def train(args, train_dataset, model, tokenizer):
                         logger.info("  "+"*"*20)                          
                         
                         # checkpoint_prefix = 'l2_checkpoint-best-acc'
-                        checkpoint_prefix = 'checkpoint-best-acc'
+                        checkpoint_prefix = 'rd_checkpoint-best-acc'
+                        # checkpoint_prefix = 'checkpoint-best-acc'
                         output_dir = os.path.join(args.output_dir, '{}'.format(checkpoint_prefix))                        
                         if not os.path.exists(output_dir):
                             os.makedirs(output_dir)                        
@@ -615,8 +623,9 @@ def main():
             logger.info("  %s = %s", key, str(round(result[key],4)))
             
     if args.do_test and args.local_rank in [-1, 0]:
-        checkpoint_prefix = 'checkpoint-best-acc/model.bin'
+        # checkpoint_prefix = 'checkpoint-best-acc/model.bin'
         # checkpoint_prefix = 'l2_checkpoint-best-acc/model.bin'
+        checkpoint_prefix = 'rd_checkpoint-best-acc/model.bin'
         files=[]
         if args.test_data_file is not None:
             for file_name in args.test_data_file.split(','):

@@ -1,68 +1,7 @@
-# from flax import optim
-# from flax.struct import dataclass as flax_dataclass
-# from flax.training import checkpoints
-# from flax import linen as nn
-# from jax import jit, random
-# from jax import numpy as jnp
-# from jax.scipy.special import expit
-
 import time
 import torch
 import torch.autograd as autograd
 import numpy as np
-
-
-# class FlaxModel(nn.Module):
-#     def setup(self, encoder, config, tokenizer, args):
-#         self.encoder = encoder
-#         self.config = config
-#         self.tokenizer = tokenizer
-#         self.args = args
-#         self.weight = 1
-    
-#     @nn.compact
-#     def __call__(self, input_ids=None,labels=None,relay=None):
-#         outputs=self.encoder(input_ids, attention_mask = (input_ids != 1))[0]
-#         logits=outputs
-#         prob=expit(logits)
-#         return prob
-    
-# def get_apply_fn_test(model):
-#   def apply_fn_test(params, model_state, x):
-#     vs = {'params': params, **model_state}
-#     logits = model.apply(vs, x, train=False, mutable=False)
-#     return logits
-#   return apply_fn_test
-
-# @flax_dataclass
-# class TrainState:
-#   optim: optim.Optimizer
-#   model: Any
-
-
-# def create_train_state(args, model):
-#   @jit
-#   def init(*args):
-#     return model.init(*args)
-#   key, input = random.PRNGKey(args.model_seed), jnp.ones((1, *args.image_shape), model.dtype)
-#   model_state, params = init(key, input).pop('params')
-
-#   opt = optim.Momentum(args.lr, args.beta, args.weight_decay, args.nesterov).create(params)
-#   train_state = TrainState(optim=opt, model=model_state)
-#   return train_state
-
-# def get_train_state(args, model):
-#   time_start = time.time()
-#   print('get train state... ', end='')
-#   state = create_train_state(args, model)
-#   if args.load_dir:
-#     print(f'load from {args.load_dir}/ckpts/checkpoint_{args.ckpt}... ', end='')
-#     state = checkpoints.restore_checkpoint(args.load_dir + '/ckpts', state, args.ckpt)
-#   print(f'{int(time.time() - time_start)}s')
-#   return state, args
-
-
-
 
 def gather_flat_grad(grads):
     views = []

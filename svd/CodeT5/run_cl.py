@@ -36,6 +36,7 @@ from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                           RobertaConfig, RobertaModel, RobertaTokenizer, T5Config, T5ForConditionalGeneration)
 from construct_exemplar import construct_exemplars_ours, calculate_coefficient
 from construct_exemplar_grad import construct_exemplars_grad
+from construct_exemplar_el2n import construct_exemplars_el2n
 from ewc import *
 from copy import deepcopy
 
@@ -588,8 +589,8 @@ def main():
 
         if 'emr' in args.mode_name or 'ewc' in args.mode_name or args.mode_name in ['hybird']:
             # construct_exemplars_ours(model_to_save,args,origin_train_examples,origin_eval_examples,tokenizer,device,'ours')
-            construct_exemplars_grad(model_to_save,args,origin_train_examples,origin_eval_examples,tokenizer,device, param_influence, 'ours')
-                    
+            # construct_exemplars_grad(model_to_save,args,origin_train_examples,origin_eval_examples,tokenizer,device, param_influence, 'ours')
+            construct_exemplars_el2n(model_to_save,args,origin_train_examples,origin_eval_examples,tokenizer,device,'ours')
 
     if args.do_test:
         files = []

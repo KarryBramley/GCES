@@ -33,6 +33,7 @@ from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                           DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer)
 
 from construct_exemplar_grad import construct_exemplars_grad
+from construct_exemplar_el2n import construct_exemplars_el2n
 from construct_exemplar import calculate_coefficient, construct_exemplars_ours
 from ewc import *
 
@@ -284,9 +285,9 @@ def train(args, train_dataset, model, tokenizer, param_influence):
         train_replay_examples = train_dataset.origin_data
         eval_replay_examples = eval_dataset.origin_data
         # construct_exemplars(model_to_save,args,train_replay_examples,eval_replay_examples,'random')
-        # construct_exemplars_ours(model_to_save,args,train_replay_examples,eval_replay_examples,tokenizer,args.device,'ours')
-        construct_exemplars_grad(model_to_save,args,train_replay_examples,eval_replay_examples,tokenizer,args.device, param_influence, 'ours')
-
+        construct_exemplars_ours(model_to_save,args,train_replay_examples,eval_replay_examples,tokenizer,args.device,'random')
+        # construct_exemplars_grad(model_to_save,args,train_replay_examples,eval_replay_examples,tokenizer,args.device, param_influence, 'ours')
+        # construct_exemplars_el2n(model_to_save,args,train_replay_examples,eval_replay_examples,tokenizer,args.device, 'ours')
 
 
 def evaluate(args, model, tokenizer,eval_when_training=False):

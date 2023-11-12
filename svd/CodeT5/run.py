@@ -240,7 +240,7 @@ def main():
     args = parser.parse_args()
     logger.info(args)
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_gpu
+    # os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_gpu
 
     # Setup CUDA, GPU & distributed training
     if args.local_rank == -1 or args.no_cuda:
