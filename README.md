@@ -3,7 +3,7 @@ ESGE is a exemplar selection method for continual learning of code intelligence 
 
 
 # Data
-Our processed datasets can be downloaded in [Zenodo](https://zenodo.org/record/7827136#.ZDjMEnZByUl).
+Our processed datasets can be downloaded in [Zenodo](https://zenodo.org/records/10409134).
 
 
 # Run the code
